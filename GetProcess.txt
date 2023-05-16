@@ -1,0 +1,92 @@
+import boto3
+import os
+
+dynamodb = boto3.client('dynamodb')
+# process incoming data
+def process(data):
+    flag = -5 if not "erpid" in data or not "dataObjectID" in data or not "criteria" in data else 1
+    ops = ['<', '>', '<=', '>=', '><', '*', '=']
+    if flag==1:
+        if data["criteria"]:        # check empty criteria
+            for i in enumerate(data["criteria"]):
+                temp = data["criteria"][i[1]]["value"]
+                if data["criteria"][i[1]]["operator"] in ops[:4]:    # check comparision operators
+                    if not temp.replace(".","", 1).isdigit(): # check for non numeric
+                        flag=-1
+                        break
+                elif data["criteria"][i[1]]["operator"] == ops[4]: # check in between(range) operator
+                    if not temp["value1"].replace(".","", 1).isdigit() or not temp["value2"].replace(".","", 1).isdigit():
+                        flag=-1
+                        break
+                elif data["criteria"][i[1]]["operator"] == ops[5]:   # partial match check
+                    flag = 2 if len(data["criteria"])==1 else -4    #change -3 to 2 later on and do the same for get calls for both erp get codes.
+        else: flag=0           # flag for GET all/ No criteria search
+    return flag
+
+# CIM Translation of common names to ERP specific names    
+def CIM(data, flag):
+    if flag > 0:   # filter condition for correct flagging. (-3 case can be ignored for AI ML model)
+        query_erp, dobj =  str(data["erpid"]), str(data["dataObjectID"])  # assigning ERP ID to variable for query string building
+        query = "SELECT field_label,field_position,field_child_name FROM AIQ_DB_Table WHERE field_mapping_type_ID=? and data_object_ID=? and common_name=?"
+        
+        for i in enumerate(data["criteria"]):  # Loop for CIM mapping of each indiviudal criteria within input json
+            query_param = data["criteria"][i[1]]["field"]  # The query parameter which needs to be mapped
+            params = [{'S': query_erp},{'S': dobj},{'S':query_param}]
+            response = dynamodb.execute_statement(Statement=query, Parameters=params)["Items"]
+            
+            d1 = [{k:list(v.values())[0] for k,v in i.items()} for i in response]
+            if d1:
+                data["criteria"][i[1]]["field"] = d1[0]["field_label"]
+                if d1[0]["field_position"]==1:
+                    data["criteria"][i[1]]["childTable"] = d1[0]["field_child_name"]  # child table reassignment
+                else:
+                    data["criteria"][i[1]]["childTable"] = None  
+            else:
+                flag=-2
+                break
+    return data,flag        
+
+
+
+def lambda_handler(event,context):
+
+    inputdata = event['data']
+    # inputdata = event
+    # inputdata = json.loads(event)
+    flag = process(inputdata)
+    if flag!=-5:
+        #data,flag = CIM(inputdata, flag, rdsData, cluster_arn, secret_arn)
+        data,flag = CIM(inputdata,flag)
+        #ERP = urlSelector(inputdata)
+        if data["erpid"] == 1:
+            ERP = "SAP"
+        if data["erpid"] == 2:
+            ERP = "Oracle"
+        if ERP=="SAP":
+            x_json = data   #Functionto call SAP: getSAP(inputdata, flag)
+        if ERP=="Oracle":
+            x_json= data   #Function to call Oracle: getOracle(inputdata, flag)
+            
+        output = {
+        'x_json' : x_json,
+        'ERP': ERP,
+        'flag': flag
+        }
+            
+    else:
+        data = {}
+        x_json = {}
+        ERP = 'None'
+        data["x_json"] = event["data"]
+        data["ERP"]='None'
+        data["flag"] = flag
+        
+        
+        output = {
+         'x_json' : x_json,
+        'data': data,
+        'ERP': ERP,
+        'flag': flag
+        }
+    return output
+    
